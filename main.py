@@ -1,0 +1,912 @@
+#!/usr/bin/env python3
+"""
+Trình phát nhạc gọn nhẹ cho Ubuntu — bản PyQt6 + QFluentWidgets
+Dùng pygame để phát âm thanh, PyQt6-Fluent-Widgets cho giao diện Fluent Design
+hiện đại (theme Sáng/Tối build-in, icon Fluent, khay hệ thống native của Qt).
+"""
+
+import os
+import sys
+import time
+import random
+
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QRectF
+from PyQt6.QtGui import QIcon, QPainter, QColor, QFont, QAction, QActionGroup
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
+    QLabel, QFileDialog, QMessageBox, QFrame, QSystemTrayIcon, QMenu,
+    QSizePolicy, QListWidgetItem
+)
+
+from qfluentwidgets import (
+    QConfig, ConfigItem, OptionsConfigItem, OptionsValidator, BoolValidator,
+    qconfig, setTheme, Theme, isDarkTheme, FluentIcon as FIF,
+    Slider, TransparentToolButton, ToolButton, PushButton, ListWidget,
+    SettingCardGroup, SwitchSettingCard, OptionsSettingCard, ScrollArea,
+    ExpandLayout, InfoBar, InfoBarPosition, BodyLabel, CaptionLabel,
+    RoundMenu, Action, themeColor,
+    MSFluentWindow  # <--- Dùng MSFluentWindow để lấy Fluent Title Bar chuẩn
+)
+
+import pygame
+
+SUPPORTED_EXT = (".mp3", ".ogg", ".wav", ".flac")
+
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "gon_nhe_music_player")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config_qt.json")
+IPC_SERVER_NAME = "gon_nhe_music_player_single_instance"
+
+try:
+    from mutagen import File as MutagenFile
+    HAS_MUTAGEN = True
+except ImportError:
+    HAS_MUTAGEN = False
+
+
+def resource_path(relative):
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, relative)
+
+
+def get_display_title(path):
+    if HAS_MUTAGEN:
+        try:
+            audio = MutagenFile(path, easy=True)
+            if audio and audio.tags:
+                title = (audio.tags.get("title") or [None])[0]
+                artist = (audio.tags.get("artist") or [None])[0]
+                if title:
+                    return f"{artist + ' - ' if artist else ''}{title}"
+        except Exception:
+            pass
+    return os.path.basename(path)
+
+
+# ============================================================================
+# Cấu hình
+# ============================================================================
+class Config(QConfig):
+    openMode = OptionsConfigItem("General", "OpenMode", "ask",
+                                  OptionsValidator(["ask", "folder", "single"]))
+    backgroundOnClose = ConfigItem("General", "BackgroundOnClose", True, BoolValidator())
+    repeatMode = OptionsConfigItem("General", "RepeatMode", "off",
+                                    OptionsValidator(["off", "all", "one"]))
+
+
+cfg = Config()
+os.makedirs(CONFIG_DIR, exist_ok=True)
+qconfig.load(CONFIG_PATH, cfg)
+
+
+# ============================================================================
+# Widget: Marquee
+# ============================================================================
+class MarqueeLabel(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(24)
+        self.text = ""
+        self.offset = 0
+        self.text_width = 0
+        self.font_ = QFont()
+        self.font_.setPointSize(10)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+
+    def set_text(self, text):
+        self.text = text
+        self.offset = 0
+        fm = self.fontMetrics()
+        self.text_width = fm.horizontalAdvance(text)
+        if self.text_width > self.width():
+            self.timer.start(35)
+        else:
+            self.timer.stop()
+        self.update()
+
+    def resizeEvent(self, e):
+        if self.text_width > self.width():
+            if not self.timer.isActive():
+                self.timer.start(35)
+        else:
+            self.timer.stop()
+            self.offset = 0
+        self.update()
+        super().resizeEvent(e)
+
+    def _tick(self):
+        gap = 60
+        self.offset -= 2
+        if self.offset < -(self.text_width + gap):
+            self.offset = self.width()
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setFont(self.font_)
+        p.setPen(QColor("#f2f2f5") if isDarkTheme() else QColor("#1c1c22"))
+        if self.text_width <= self.width():
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter, self.text)
+        else:
+            y = self.height() // 2 + 5
+            p.drawText(self.offset, y, self.text)
+
+
+# ============================================================================
+# Widget: Equalizer
+# ============================================================================
+class EqualizerWidget(QWidget):
+    def __init__(self, bars=4, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(30, 22)
+        self.bars_count = bars
+        self.heights = [0.12] * bars
+        self.targets = [0.12] * bars
+        self.playing = False
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(110)
+
+    def set_playing(self, playing):
+        self.playing = playing
+
+    def _tick(self):
+        for i in range(self.bars_count):
+            if self.playing:
+                if random.random() < 0.4:
+                    self.targets[i] = random.uniform(0.15, 1.0)
+            else:
+                self.targets[i] = 0.12
+            self.heights[i] += (self.targets[i] - self.heights[i]) * 0.35
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = themeColor()
+        p.setBrush(color)
+        p.setPen(Qt.PenStyle.NoPen)
+        w, h = self.width(), self.height()
+        gap = 3
+        bar_w = max(2, (w - gap * (self.bars_count + 1)) / self.bars_count)
+        for i in range(self.bars_count):
+            x0 = gap + i * (bar_w + gap)
+            bar_h = max(2, self.heights[i] * h)
+            p.drawRoundedRect(QRectF(x0, h - bar_h, bar_w, bar_h), 1, 1)
+
+
+# ============================================================================
+# Widget: MarkerSlider
+# ============================================================================
+class MarkerSlider(Slider):
+    def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
+        super().__init__(orientation, parent)
+        self.markers = []
+
+    def set_markers(self, markers):
+        self.markers = markers
+        self.update()
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if not self.markers:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        margin = 8
+        usable = max(1, self.width() - margin * 2)
+        for pos, color in self.markers:
+            frac = pos / max(1, self.maximum())
+            x = margin + usable * frac
+            p.setPen(QColor(color))
+            p.drawLine(int(x), 4, int(x), self.height() - 4)
+
+
+# ============================================================================
+# Playlist Window
+# ============================================================================
+class PlaylistWindow(MSFluentWindow):
+    def __init__(self, player):
+        # 1. KHÔNG truyền 'parent' vào super().__init__() để nó thành cửa sổ độc lập
+        super().__init__()
+        self.player = player
+        self.setWindowTitle("Danh sách phát")
+        self.resize(360, 420)
+
+        # Ẩn sidebar navigation
+        self.navigationInterface.hide()
+
+        # Layout & UI
+        container = QWidget(self)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        toolbar = QHBoxLayout()
+        for text, slot in [("Thêm file", player.add_files), ("Thêm thư mục", player.add_folder),
+                            ("Xoá bài", self.remove_selected), ("Xoá tất cả", player.clear_playlist)]:
+            btn = PushButton(text)
+            btn.clicked.connect(slot)
+            toolbar.addWidget(btn)
+        layout.addLayout(toolbar)
+
+        self.list_widget = ListWidget(self)
+        self.list_widget.itemDoubleClicked.connect(self._on_double_click)
+        layout.addWidget(self.list_widget)
+
+        self.stackedWidget.addWidget(container)
+
+    def remove_selected(self):
+        rows = sorted({i.row() for i in self.list_widget.selectedIndexes()}, reverse=True)
+        for r in rows:
+            self.player.remove_at(r)
+
+    def _on_double_click(self, item):
+        row = self.list_widget.row(item)
+        self.player.play_index(row)
+
+    # 2. Xử lý khi bấm nút X đóng cửa sổ Playlist -> Chỉ ẩn chứ không thoát hay tắt Main
+    def closeEvent(self, e):
+        e.ignore()
+        self.hide()
+
+
+# ============================================================================
+# Settings Window
+# ============================================================================
+class SettingsWindow(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Cài đặt")
+        self.resize(420, 320)
+
+        layout = QVBoxLayout(self)
+        scroll = ScrollArea(self)
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        v = QVBoxLayout(content)
+
+        group = SettingCardGroup("Chung", content)
+
+        open_mode_card = OptionsSettingCard(
+            cfg.openMode, FIF.MUSIC_FOLDER,
+            "Khi mở file nhạc từ ngoài",
+            "Hành vi khi double-click 1 file nhạc trong File Manager",
+            texts=["Hỏi mỗi lần", "Luôn phát cả thư mục", "Chỉ phát riêng file đó"],
+        )
+        group.addSettingCard(open_mode_card)
+
+        bg_card = SwitchSettingCard(
+            FIF.MINIMIZE,
+            "Chạy nền khi đóng cửa sổ",
+            "Bật: bấm X chỉ ẩn xuống khay hệ thống, nhạc vẫn phát.\n"
+            "Tắt: bấm X sẽ thoát hẳn ứng dụng.",
+            configItem=cfg.backgroundOnClose,
+        )
+        group.addSettingCard(bg_card)
+
+        v.addWidget(group)
+        v.addStretch(1)
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+
+
+# ============================================================================
+# Cửa sổ chính (Kế thừa MSFluentWindow để lấy TitleBar của DK Clock)
+# ============================================================================
+class MainWindow(MSFluentWindow):
+    def __init__(self, startup_file=None):
+        super().__init__()
+        self.setWindowTitle("Trình Phát Nhạc")
+        self.resize(640, 260)
+        self.setMinimumSize(600, 240)
+
+        # --- ẨN SIDEBAR VÀ NÚT BACK KHỎI TITLE BAR ---
+        self.navigationInterface.hide()
+
+        pygame.mixer.init()
+
+        self.playlist = []
+        self.current_index = -1
+        self.paused = False
+        self.song_length = 0
+        self.start_time = 0
+        self.offset = 0
+        self.volume = 0.7
+        self.manually_stopped = False
+        self.loop_a = None
+        self.loop_b = None
+        self.repeat_mode = cfg.repeatMode.value
+        self.tray = None
+        self.playlist_win = None
+        self.settings_win = None
+
+        # Container chứa toàn bộ UI
+        self.main_container = QWidget(self)
+        self.main_layout = QVBoxLayout(self.main_container)
+        self.main_layout.setContentsMargins(14, 4, 14, 12)
+        self.main_layout.setSpacing(6)
+
+        # Thêm container vào stackedWidget của MSFluentWindow
+        self.stackedWidget.addWidget(self.main_container)
+
+
+        self._build_menu()
+        self._build_ui()
+        self._build_tray()
+        self.apply_theme(cfg.themeMode.value)
+        self._refresh_nav_buttons()
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._update_loop)
+        self.timer.start(300)
+
+        if startup_file:
+            QTimer.singleShot(200, lambda: self._handle_startup_file(startup_file))
+
+    # ---------- Menu ----------
+    def _build_menu(self):
+        from PyQt6.QtWidgets import QMenuBar
+
+        # Tạo MenuBar chuẩn của Qt và add trực tiếp vào layout chính
+        menubar = QMenuBar(self)
+        self.main_layout.setMenuBar(menubar)
+
+        # 1. Menu Tệp
+        file_menu = menubar.addMenu("Tệp")
+        act_add_files = QAction("Thêm file...", self)
+        act_add_files.triggered.connect(self.add_files)
+        file_menu.addAction(act_add_files)
+        
+        act_add_folder = QAction("Thêm thư mục...", self)
+        act_add_folder.triggered.connect(self.add_folder)
+        file_menu.addAction(act_add_folder)
+        
+        file_menu.addSeparator()
+        
+        act_quit = QAction("Thoát", self)
+        act_quit.triggered.connect(self.do_quit)
+        file_menu.addAction(act_quit)
+
+        # 2. Menu Xem
+        view_menu = menubar.addMenu("Xem")
+        act_playlist = QAction("Hiện/Ẩn Playlist", self)
+        act_playlist.triggered.connect(self.toggle_playlist_window)
+        view_menu.addAction(act_playlist)
+
+        # 3. Menu Giao diện
+        theme_menu = menubar.addMenu("Giao diện")
+        group = QActionGroup(self)
+        act_light = QAction("Sáng (Light)", self, checkable=True)
+        act_dark = QAction("Tối (Dark)", self, checkable=True)
+        (act_dark if isDarkTheme() else act_light).setChecked(True)
+        
+        for act, theme in ((act_light, Theme.LIGHT), (act_dark, Theme.DARK)):
+            group.addAction(act)
+            act.triggered.connect(lambda checked, th=theme: self.apply_theme(th))
+            theme_menu.addAction(act)
+
+        # 4. Menu Cài đặt
+        settings_menu = menubar.addMenu("Cài đặt")
+        act_settings = QAction("Cài đặt...", self)
+        act_settings.triggered.connect(self.open_settings)
+        settings_menu.addAction(act_settings)
+
+    def open_settings(self):
+        if self.settings_win is None:
+            self.settings_win = SettingsWindow(self)
+        self.settings_win.show()
+        self.settings_win.raise_()
+
+    # ---------- Giao diện ----------
+    def _build_ui(self):
+        # --- Tiêu đề ---
+        title_row = QHBoxLayout()
+        self.equalizer = EqualizerWidget()
+        title_row.addWidget(self.equalizer)
+        self.marquee = MarqueeLabel()
+        title_row.addWidget(self.marquee, 1)
+        self.marquee.set_text("Chưa phát bài nào")
+        self.theme_btn = TransparentToolButton(FIF.CONSTRACT)
+        self.theme_btn.clicked.connect(self.toggle_theme)
+        self.theme_btn.setToolTip("Đổi giao diện Sáng/Tối")
+        title_row.addWidget(self.theme_btn)
+        self.main_layout.addLayout(title_row)
+
+        # --- Thanh tiến độ ---
+        seek_row = QHBoxLayout()
+        self.seek_slider = MarkerSlider(Qt.Orientation.Horizontal)
+        self.seek_slider.setRange(0, 1000)
+        self.seek_slider.sliderReleased.connect(self._on_seek_release)
+        self._seek_dragging = False
+        self.seek_slider.sliderPressed.connect(lambda: setattr(self, "_seek_dragging", True))
+        seek_row.addWidget(self.seek_slider, 1)
+        self.time_label = CaptionLabel("00:00 / 00:00")
+        self.time_label.setFixedWidth(90)
+        self.time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        seek_row.addWidget(self.time_label)
+        self.main_layout.addLayout(seek_row)
+
+        # --- 1 hàng duy nhất: mọi nút chức năng + âm lượng ---
+        controls = QHBoxLayout()
+        controls.setSpacing(4)
+
+        self.prev_btn = TransparentToolButton(FIF.SKIP_BACK)
+        self.prev_btn.clicked.connect(self.prev_song)
+        controls.addWidget(self.prev_btn)
+
+        self.play_btn = PushButton()
+        self.play_btn.setFixedSize(44, 44)
+        self.play_btn.setIcon(FIF.PLAY.icon(color=QColor("white")))
+        self.play_btn.setIconSize(self.play_btn.iconSize())
+        self._style_play_button()
+        self.play_btn.clicked.connect(self.toggle_play)
+        controls.addWidget(self.play_btn)
+
+        self.stop_btn = TransparentToolButton(QIcon(resource_path("assets/icons/stop_dark.png")))
+        self.stop_btn.clicked.connect(self.stop_song)
+        controls.addWidget(self.stop_btn)
+
+        self.next_btn = TransparentToolButton(FIF.SKIP_FORWARD)
+        self.next_btn.clicked.connect(self.next_song)
+        controls.addWidget(self.next_btn)
+
+        controls.addWidget(self._vline())
+
+        self.playlist_btn = TransparentToolButton(FIF.MENU)
+        self.playlist_btn.clicked.connect(self.toggle_playlist_window)
+        self.playlist_btn.setToolTip("Danh sách phát")
+        controls.addWidget(self.playlist_btn)
+
+        self.repeat_btn = TransparentToolButton(QIcon(resource_path(f"assets/icons/repeat_{self.repeat_mode}.png")))
+        self.repeat_btn.clicked.connect(self.cycle_repeat)
+        self.repeat_btn.setToolTip("Lặp lại: Tắt / Playlist / 1 bài")
+        controls.addWidget(self.repeat_btn)
+
+        controls.addWidget(self._vline())
+
+        self.a_btn = ToolButton()
+        self.a_btn.setText("A")
+        self.a_btn.setFixedSize(28, 28)
+        self.a_btn.clicked.connect(self.toggle_a)
+        controls.addWidget(self.a_btn)
+
+        self.b_btn = ToolButton()
+        self.b_btn.setText("B")
+        self.b_btn.setFixedSize(28, 28)
+        self.b_btn.clicked.connect(self.toggle_b)
+        controls.addWidget(self.b_btn)
+
+        self.ab_clear_btn = TransparentToolButton(FIF.CLOSE)
+        self.ab_clear_btn.setToolTip("Xoá điểm lặp A-B")
+        self.ab_clear_btn.clicked.connect(self.clear_ab)
+        controls.addWidget(self.ab_clear_btn)
+
+        controls.addStretch(1)
+
+        vol_icon = TransparentToolButton(FIF.VOLUME)
+        vol_icon.setEnabled(False)
+        controls.addWidget(vol_icon)
+        self.vol_slider = Slider(Qt.Orientation.Horizontal)
+        self.vol_slider.setRange(0, 100)
+        self.vol_slider.setValue(70)
+        self.vol_slider.setFixedWidth(110)
+        self.vol_slider.valueChanged.connect(self._on_volume_change)
+        controls.addWidget(self.vol_slider)
+
+        self.main_layout.addLayout(controls)
+
+    def _vline(self):
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.VLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        line.setFixedHeight(24)
+        return line
+
+    def _style_play_button(self):
+        c = themeColor().name()
+        self.play_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {c}; border-radius: 22px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {c}; }}"
+        )
+
+    # ---------- Theme ----------
+    def toggle_theme(self):
+        self.apply_theme(Theme.LIGHT if isDarkTheme() else Theme.DARK)
+
+    def apply_theme(self, theme):
+        setTheme(theme)
+        self._style_play_button()
+        self.stop_btn.setIcon(QIcon(resource_path(
+            f"assets/icons/stop_{'dark' if isDarkTheme() else 'light'}.png")))
+        self.marquee.update()
+
+    # ---------- Playlist window ----------
+    def toggle_playlist_window(self):
+        if self.playlist_win is None:
+            # Bỏ tham số parent 'self' thứ 2 đi, chỉ truyền 'self' làm player
+            self.playlist_win = PlaylistWindow(self) 
+            for path in self.playlist:
+                self.playlist_win.list_widget.addItem(os.path.basename(path))
+        if self.playlist_win.isVisible():
+            self.playlist_win.hide()
+        else:
+            self.playlist_win.show()
+            self.playlist_win.raise_()
+
+    # ---------- Xử lý file mở kèm ----------
+    def _handle_startup_file(self, path):
+        path = os.path.abspath(path)
+        if not os.path.isfile(path):
+            return
+        mode = cfg.openMode.value
+        if mode == "ask":
+            box = QMessageBox(self)
+            box.setWindowTitle("Mở nhạc")
+            box.setText(f"Bạn muốn phát toàn bộ các bài nhạc trong thư mục chứa file:\n"
+                        f"{os.path.basename(path)}\n\nCó = phát cả thư mục\nKhông = chỉ phát file này")
+            box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No |
+                                    QMessageBox.StandardButton.Cancel)
+            ans = box.exec()
+            if ans == QMessageBox.StandardButton.Cancel:
+                return
+            mode = "folder" if ans == QMessageBox.StandardButton.Yes else "single"
+
+        if mode == "folder":
+            folder = os.path.dirname(path)
+            self._scan_folder_into_playlist(folder)
+            idx = self.playlist.index(path) if path in self.playlist else (0 if self.playlist else -1)
+        else:
+            self._add_to_playlist(path)
+            idx = len(self.playlist) - 1
+
+        if idx >= 0:
+            self.current_index = idx
+            self._play_current()
+
+    # ---------- Quản lý playlist ----------
+    def add_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Chọn file nhạc", "", "Nhạc (*.mp3 *.ogg *.wav *.flac);;Tất cả (*.*)")
+        if not files:
+            return
+        first_new_index = len(self.playlist)
+        for f in files:
+            self._add_to_playlist(f)
+        self.current_index = first_new_index
+        self._play_current()
+
+    def add_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục nhạc")
+        if folder:
+            self._scan_folder_into_playlist(folder)
+
+    def _scan_folder_into_playlist(self, folder):
+        for root_dir, _, files in os.walk(folder):
+            for f in sorted(files):
+                if f.lower().endswith(SUPPORTED_EXT):
+                    self._add_to_playlist(os.path.join(root_dir, f))
+
+    def _add_to_playlist(self, path):
+        self.playlist.append(path)
+        if self.playlist_win is not None:
+            self.playlist_win.list_widget.addItem(os.path.basename(path))
+        self._refresh_nav_buttons()
+
+    def remove_at(self, i):
+        if not (0 <= i < len(self.playlist)):
+            return
+        del self.playlist[i]
+        if self.playlist_win is not None:
+            self.playlist_win.list_widget.takeItem(i)
+        if i == self.current_index:
+            self.stop_song()
+        self._refresh_nav_buttons()
+
+    def clear_playlist(self):
+        self.stop_song()
+        self.playlist.clear()
+        if self.playlist_win is not None:
+            self.playlist_win.list_widget.clear()
+        self._refresh_nav_buttons()
+
+    def _refresh_nav_buttons(self):
+        enabled = len(self.playlist) > 1
+        self.prev_btn.setEnabled(enabled)
+        self.next_btn.setEnabled(enabled)
+
+    def play_index(self, i):
+        self.current_index = i
+        self._play_current()
+
+    # ---------- Điều khiển phát ----------
+    def _play_current(self):
+        if not (0 <= self.current_index < len(self.playlist)):
+            return
+        path = self.playlist[self.current_index]
+        try:
+            pygame.mixer.music.load(path)
+            pygame.mixer.music.set_volume(self.volume)
+            pygame.mixer.music.play()
+        except Exception as e:
+            QMessageBox.critical(self, "Lỗi", f"Không thể phát file:\n{path}\n{e}")
+            return
+        self.paused = False
+        self.manually_stopped = False
+        self.offset = 0
+        self.start_time = time.time()
+        self.play_btn.setIcon(FIF.PAUSE.icon(color=QColor("white")))
+        self.equalizer.set_playing(True)
+
+        display = get_display_title(path)
+        self.marquee.set_text(f"Đang phát: {display}")
+        if self.playlist_win is not None:
+            self.playlist_win.list_widget.setCurrentRow(self.current_index)
+        self.song_length = self._get_length(path)
+
+        self.loop_a = None
+        self.loop_b = None
+        self._refresh_ab_buttons()
+        self._refresh_markers()
+
+    def _get_length(self, path):
+        try:
+            return pygame.mixer.Sound(path).get_length()
+        except Exception:
+            return 0
+
+    def toggle_play(self):
+        if self.current_index == -1:
+            if self.playlist:
+                self.current_index = 0
+                self._play_current()
+            return
+        if self.paused:
+            pygame.mixer.music.unpause()
+            self.paused = False
+            self.start_time = time.time() - self.offset
+            self.play_btn.setIcon(FIF.PAUSE.icon(color=QColor("white")))
+            self.equalizer.set_playing(True)
+        else:
+            if pygame.mixer.music.get_busy():
+                pygame.mixer.music.pause()
+                self.paused = True
+                self.offset = time.time() - self.start_time
+                self.play_btn.setIcon(FIF.PLAY.icon(color=QColor("white")))
+                self.equalizer.set_playing(False)
+            else:
+                self._play_current()
+
+    def stop_song(self):
+        self.manually_stopped = True
+        pygame.mixer.music.stop()
+        self.play_btn.setIcon(FIF.PLAY.icon(color=QColor("white")))
+        self.equalizer.set_playing(False)
+        self.marquee.set_text("Chưa phát bài nào")
+        self.time_label.setText("00:00 / 00:00")
+        self.seek_slider.setValue(0)
+        self.paused = False
+        self.offset = 0
+
+    def next_song(self):
+        if not self.playlist:
+            return
+        self.current_index = (self.current_index + 1) % len(self.playlist)
+        self._play_current()
+
+    def prev_song(self):
+        if not self.playlist:
+            return
+        self.current_index = (self.current_index - 1) % len(self.playlist)
+        self._play_current()
+
+    def _on_volume_change(self, val):
+        self.volume = val / 100
+        pygame.mixer.music.set_volume(self.volume)
+
+    def _seek_to(self, seconds):
+        try:
+            pygame.mixer.music.play(start=seconds)
+            self.offset = seconds
+            self.start_time = time.time() - seconds
+            self.paused = False
+            self.manually_stopped = False
+            self.play_btn.setIcon(FIF.PAUSE.icon(color=QColor("white")))
+            self.equalizer.set_playing(True)
+        except Exception:
+            pass
+
+    def _on_seek_release(self):
+        self._seek_dragging = False
+        if self.song_length > 0 and self.current_index != -1:
+            pct = self.seek_slider.value() / 1000
+            self._seek_to(pct * self.song_length)
+
+    def _current_elapsed(self):
+        return self.offset if self.paused else (time.time() - self.start_time)
+
+    @staticmethod
+    def _fmt(seconds):
+        m, s = divmod(int(seconds), 60)
+        return f"{m:02d}:{s:02d}"
+
+    # ---------- Repeat ----------
+    def cycle_repeat(self):
+        order = ["off", "all", "one"]
+        self.repeat_mode = order[(order.index(self.repeat_mode) + 1) % len(order)]
+        cfg.set(cfg.repeatMode, self.repeat_mode)
+        self.repeat_btn.setIcon(QIcon(resource_path(f"assets/icons/repeat_{self.repeat_mode}.png")))
+
+    # ---------- A-B repeat ----------
+    def toggle_a(self):
+        if self.current_index == -1 or self.song_length <= 0:
+            return
+        if self.loop_a is None:
+            self.loop_a = self._current_elapsed()
+            if self.loop_b is not None and self.loop_b <= self.loop_a:
+                self.loop_b = None
+        else:
+            self.loop_a = None
+            self.loop_b = None
+        self._refresh_ab_buttons()
+        self._refresh_markers()
+
+    def toggle_b(self):
+        if self.current_index == -1 or self.song_length <= 0 or self.loop_a is None:
+            return
+        if self.loop_b is None:
+            b = self._current_elapsed()
+            if b > self.loop_a + 0.3:
+                self.loop_b = b
+        else:
+            self.loop_b = None
+        self._refresh_ab_buttons()
+        self._refresh_markers()
+
+    def clear_ab(self):
+        self.loop_a = None
+        self.loop_b = None
+        self._refresh_ab_buttons()
+        self._refresh_markers()
+
+    def _refresh_ab_buttons(self):
+        c = themeColor().name()
+        for btn, active in ((self.a_btn, self.loop_a is not None), (self.b_btn, self.loop_b is not None)):
+            if active:
+                btn.setStyleSheet(f"QToolButton {{ background-color: {c}; color: white; border-radius: 6px; }}")
+            else:
+                btn.setStyleSheet("")
+
+    def _refresh_markers(self):
+        markers = []
+        if self.song_length > 0:
+            if self.loop_a is not None:
+                markers.append((self.loop_a / self.song_length * 1000, "#2ecc71"))
+            if self.loop_b is not None:
+                markers.append((self.loop_b / self.song_length * 1000, "#e74c3c"))
+        self.seek_slider.set_markers(markers)
+
+    # ---------- Vòng lặp cập nhật ----------
+    def _update_loop(self):
+        if self.current_index != -1 and not self.paused:
+            if pygame.mixer.music.get_busy():
+                elapsed = time.time() - self.start_time
+                if self.loop_a is not None and self.loop_b is not None and elapsed >= self.loop_b:
+                    self._seek_to(self.loop_a)
+                else:
+                    if not self._seek_dragging and self.song_length > 0:
+                        self.seek_slider.blockSignals(True)
+                        self.seek_slider.setValue(int(min(elapsed / self.song_length, 1.0) * 1000))
+                        self.seek_slider.blockSignals(False)
+                    self.time_label.setText(f"{self._fmt(elapsed)} / {self._fmt(self.song_length)}")
+            else:
+                if not self.manually_stopped:
+                    if self.repeat_mode == "one":
+                        self._play_current()
+                    elif self.repeat_mode == "all":
+                        self.next_song()
+                    else:
+                        if self.playlist and self.current_index < len(self.playlist) - 1:
+                            self.next_song()
+                        else:
+                            self.stop_song()
+
+    # ---------- Khay hệ thống ----------
+    def _build_tray(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray = None
+            return
+        icon_path = resource_path("assets/icon.png")
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else self.windowIcon()
+        self.tray = QSystemTrayIcon(icon, self)
+        self.tray.setToolTip("Music Player")
+        menu = QMenu()
+        act_show = menu.addAction("Mở lại")
+        act_show.triggered.connect(self._restore_from_tray)
+        act_quit = menu.addAction("Thoát")
+        act_quit.triggered.connect(self.do_quit)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(
+            lambda reason: self._restore_from_tray() if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
+
+    def _restore_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def closeEvent(self, e):
+        if not cfg.backgroundOnClose.value:
+            e.accept()
+            self.do_quit()
+            return
+        if self.tray is not None:
+            e.ignore()
+            self.hide()
+            if self.playlist_win is not None:
+                self.playlist_win.hide()
+            self.tray.show()
+            self.tray.showMessage("Đang phát nhạc ở nền",
+                                   "Nhấn vào biểu tượng khay hệ thống để mở lại cửa sổ.",
+                                   QSystemTrayIcon.MessageIcon.Information, 4000)
+        else:
+            e.ignore()
+            self.showMinimized()
+
+    def do_quit(self):
+        pygame.mixer.music.stop()
+        pygame.mixer.quit()
+        qconfig.save()
+        QApplication.quit()
+
+    def handle_ipc_message(self, file_path):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if file_path:
+            self._handle_startup_file(file_path)
+
+
+def main():
+    startup_file = None
+    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
+        startup_file = sys.argv[1]
+
+    app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+
+    probe = QLocalSocket()
+    probe.connectToServer(IPC_SERVER_NAME)
+    if probe.waitForConnected(200):
+        probe.write((startup_file or "").encode("utf-8"))
+        probe.waitForBytesWritten(200)
+        probe.disconnectFromServer()
+        return
+    probe.close()
+
+    setTheme(cfg.themeMode.value)
+
+    win = MainWindow(startup_file=startup_file)
+
+    QLocalServer.removeServer(IPC_SERVER_NAME)
+    ipc_server = QLocalServer()
+    ipc_server.listen(IPC_SERVER_NAME)
+
+    def _on_new_ipc_connection():
+        sock = ipc_server.nextPendingConnection()
+        if sock is None:
+            return
+        if sock.waitForReadyRead(300):
+            data = bytes(sock.readAll()).decode("utf-8")
+            win.handle_ipc_message(data if data else None)
+        sock.disconnectFromServer()
+
+    ipc_server.newConnection.connect(_on_new_ipc_connection)
+    win._ipc_server = ipc_server
+
+    win.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
