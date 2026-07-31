@@ -370,6 +370,47 @@ class PlaylistWindow(MSFluentWindow):
         row = self.list_widget.row(item)
         self.player.play_index(row)
 
+    def update_playlist_ui(self):
+        self.list_widget.clear()
+        
+        # Lấy theme suffix để chọn icon play_dark.png hoặc play_light.png
+        theme_suffix = 'dark' if isDarkTheme() else 'light'
+        play_icon = QIcon(resource_path(f"assets/icons/play_{theme_suffix}.png"))
+        
+        # Màu accent (cho bài đang play) và màu xám (cho bài đã play)
+        accent_color = themeColor()
+        gray_color = QColor("#888888") if isDarkTheme() else QColor("#666666")
+        default_color = QColor("#FFFFFF") if isDarkTheme() else QColor("#000000")
+
+        # Dùng played_indices (tập hợp các bài ĐÃ THỰC SỰ được phát) thay vì suy
+        # theo vị trí index. So sánh theo vị trí (idx < current_index) chỉ đúng
+        # khi phát tuần tự tăng dần, nên bị sai khi dùng Prev, khi Next lặp vòng
+        # về đầu playlist, hoặc khi double-click mở thẳng một bài giữa danh sách.
+        played = getattr(self.player, 'played_indices', set())
+
+        for idx, song_path in enumerate(self.player.playlist):
+            song_name = os.path.basename(song_path)
+            item = QListWidgetItem(song_name)
+
+            if idx == self.player.current_index:
+                # 1. BÀI ĐANG PLAY: Hiện icon play + chữ màu accent
+                item.setIcon(play_icon)
+                item.setForeground(accent_color)
+                # Set font đậm nhẹ cho nổi bật
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+
+            elif idx in played:
+                # 2. BÀI ĐÃ PLAY (không phải bài hiện tại): chữ xám
+                item.setForeground(gray_color)
+
+            else:
+                # 3. BÀI CHƯA PLAY: màu mặc định
+                item.setForeground(default_color)
+
+            self.list_widget.addItem(item)
+
     # When close button (X) is pressed -> Hide window instead of exiting
     def closeEvent(self, e):
         e.ignore()
@@ -443,8 +484,7 @@ class MainWindow(MSFluentWindow):
         self.setWindowTitle("DK Music Player")
         app_icon = get_app_icon()
         self.setWindowIcon(app_icon)
-        self.resize(640, 260)
-        self.setFixedSize(680, 240)
+        self.setFixedSize(750, 240)
         self.is_muted = False
         saved_vol = cfg.volume.value
         self.last_volume = saved_vol if saved_vol > 0 else 70
@@ -455,7 +495,11 @@ class MainWindow(MSFluentWindow):
 
         # Increased audio buffer to 2048 to prevent underruns/stuttering
         pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048)
-
+        self.shuffle_mode = False
+        self.unplayed_indices = []
+        self.shuffle_history = []
+        self.shuffle_history_pos = -1
+        self.played_indices = set()
         self.playlist = []
         self.current_index = -1
         self.paused = False
@@ -578,6 +622,7 @@ class MainWindow(MSFluentWindow):
         controls.addWidget(self._vline()) 
 
         self.prev_btn = TransparentToolButton(QIcon(resource_path("assets/icons/prev_dark.png")))
+        self.prev_btn.setIconSize(QSize(24, 24))
         self.prev_btn.clicked.connect(self.prev_song)
         controls.addWidget(self.prev_btn)
 
@@ -586,10 +631,12 @@ class MainWindow(MSFluentWindow):
         controls.addWidget(self.play_btn)
 
         self.stop_btn = TransparentToolButton(QIcon(resource_path("assets/icons/stop_dark.png")))
+        self.stop_btn.setIconSize(QSize(24, 24))
         self.stop_btn.clicked.connect(self.stop_song)
         controls.addWidget(self.stop_btn)
 
         self.next_btn = TransparentToolButton(QIcon(resource_path("assets/icons/next_dark.png")))
+        self.next_btn.setIconSize(QSize(24, 24))
         self.next_btn.clicked.connect(self.next_song)
         controls.addWidget(self.next_btn)
 
@@ -601,9 +648,16 @@ class MainWindow(MSFluentWindow):
         controls.addWidget(self.playlist_btn)
 
         self.repeat_btn = TransparentToolButton(QIcon(resource_path(f"assets/icons/repeat_{self.repeat_mode}.png")))
+        self.repeat_btn.setIconSize(QSize(24, 24))
         self.repeat_btn.clicked.connect(self.cycle_repeat)
         self.repeat_btn.setToolTip("Repeat: Off / All / Single Track")
         controls.addWidget(self.repeat_btn)
+        self.shuffle_btn = TransparentToolButton(QIcon(resource_path(f"assets/icons/shuffle_{'dark' if isDarkTheme() else 'light'}.png")))
+        self.shuffle_btn.setIconSize(QSize(24, 24))
+        self.shuffle_btn.setToolTip("Shuffle: Off")
+        self.shuffle_btn.clicked.connect(self.toggle_shuffle)
+        controls.addWidget(self.shuffle_btn)
+
 
         controls.addWidget(self._vline())
 
@@ -688,14 +742,21 @@ class MainWindow(MSFluentWindow):
                     f"assets/icons/prev_{'dark' if isDarkTheme() else 'light'}.png")))
         self.next_btn.setIcon(QIcon(resource_path(
                     f"assets/icons/next_{'dark' if isDarkTheme() else 'light'}.png")))
+        if not getattr(self, "shuffle_mode", False):
+            self.shuffle_btn.setIcon(QIcon(resource_path(
+                        f"assets/icons/shuffle_{'dark' if isDarkTheme() else 'light'}.png")))
+        else:
+            self.shuffle_btn.setIcon(QIcon(resource_path(
+                        f"assets/icons/shuffle_active.png")))
         self.marquee.update()
+        if hasattr(self, 'playlist_win') and self.playlist_win is not None:
+            self.playlist_win.update_playlist_ui()
 
     # ---------- Playlist Window ----------
     def toggle_playlist_window(self):
         if self.playlist_win is None:
-            self.playlist_win = PlaylistWindow(self) 
-            for path in self.playlist:
-                self.playlist_win.list_widget.addItem(os.path.basename(path))
+            self.playlist_win = PlaylistWindow(self)
+            self.playlist_win.update_playlist_ui()
         if self.playlist_win.isVisible():
             self.playlist_win.hide()
         else:
@@ -767,13 +828,32 @@ class MainWindow(MSFluentWindow):
         del self.playlist[i]
         if self.playlist_win is not None:
             self.playlist_win.list_widget.takeItem(i)
+        # Dịch lại played_indices cho khớp với playlist sau khi xoá 1 bài
+        self.played_indices = {
+            (p - 1 if p > i else p) for p in self.played_indices if p != i
+        }
+        self.unplayed_indices = [
+            (p - 1 if p > i else p) for p in self.unplayed_indices if p != i
+        ]
+        self.shuffle_history = [
+            (p - 1 if p > i else p) for p in self.shuffle_history if p != i
+        ]
+        self.shuffle_history_pos = min(self.shuffle_history_pos, len(self.shuffle_history) - 1)
         if i == self.current_index:
             self.stop_song()
+        elif i < self.current_index:
+            self.current_index -= 1
         self._refresh_nav_buttons()
+        if self.playlist_win is not None:
+            self.playlist_win.update_playlist_ui()
 
     def clear_playlist(self):
         self.stop_song()
         self.playlist.clear()
+        self.played_indices = set()
+        self.unplayed_indices = []
+        self.shuffle_history = []
+        self.shuffle_history_pos = -1
         if self.playlist_win is not None:
             self.playlist_win.list_widget.clear()
         self._refresh_nav_buttons()
@@ -799,6 +879,22 @@ class MainWindow(MSFluentWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Cannot play file:\n{path}\n{e}")
             return
+        # Ghi nhận bài này đã thực sự được phát (dùng để tô màu xám đúng,
+        # không phụ thuộc vào vị trí index như trước - lỗi khi dùng prev/next/mở từ playlist)
+        self.played_indices.add(self.current_index)
+
+        # Đồng bộ túi shuffle + lịch sử shuffle với bài vừa mở, kể cả khi bài
+        # này được mở bằng double-click/play_index chứ không qua Next/Prev.
+        if self.shuffle_mode:
+            if self.current_index in self.unplayed_indices:
+                self.unplayed_indices.remove(self.current_index)
+            if (not self.shuffle_history
+                    or self.shuffle_history[self.shuffle_history_pos] != self.current_index):
+                # Cắt bỏ phần lịch sử "đi tiếp" cũ nếu người dùng vừa mở 1 bài khác
+                self.shuffle_history = self.shuffle_history[: self.shuffle_history_pos + 1]
+                self.shuffle_history.append(self.current_index)
+                self.shuffle_history_pos = len(self.shuffle_history) - 1
+
         self.paused = False
         self.manually_stopped = False
         self.offset = 0
@@ -816,6 +912,8 @@ class MainWindow(MSFluentWindow):
         self.loop_b = None
         self._refresh_ab_buttons()
         self._refresh_markers()
+        if hasattr(self, 'playlist_win') and self.playlist_win is not None:
+            self.playlist_win.update_playlist_ui()
 
     def _get_length(self, path):
         if HAS_MUTAGEN:
@@ -859,21 +957,61 @@ class MainWindow(MSFluentWindow):
         self.equalizer.set_playing(False)
         self.marquee.set_text("No track playing")
         self.time_label.setText("00:00 / 00:00")
+        # Phải chặn tín hiệu valueChanged khi set slider về 0, nếu không
+        # sẽ trigger _on_seek_value_changed -> _seek_to(0) -> phát lại bài
+        # hát từ đầu ngay sau khi vừa Stop!
+        self._block_seek_signal = True
         self.seek_slider.setValue(0)
+        self._block_seek_signal = False
         self.paused = False
         self.offset = 0
+
 
     def next_song(self):
         if not self.playlist:
             return
-        self.current_index = (self.current_index + 1) % len(self.playlist)
+        if self.shuffle_mode:
+            self._advance_shuffle(forward=True)
+        else:
+            self.current_index = (self.current_index + 1) % len(self.playlist)
         self._play_current()
 
     def prev_song(self):
         if not self.playlist:
             return
-        self.current_index = (self.current_index - 1) % len(self.playlist)
+        if self.shuffle_mode:
+            self._advance_shuffle(forward=False)
+        else:
+            self.current_index = (self.current_index - 1) % len(self.playlist)
         self._play_current()
+
+    def _advance_shuffle(self, forward: bool):
+        """Chọn bài kế tiếp/trước đó theo chế độ Shuffle.
+
+        Dùng self.unplayed_indices làm "túi" các bài chưa random tới trong vòng
+        hiện tại, và self.shuffle_history để Prev có thể lùi lại đúng bài ngẫu
+        nhiên vừa phát (thay vì random 1 bài mới mỗi lần bấm Prev).
+        """
+        if forward:
+            # Nếu đang đứng giữa lịch sử (vừa Prev xong) -> đi tiếp trong lịch sử
+            # đó trước khi random bài mới.
+            if self.shuffle_history_pos < len(self.shuffle_history) - 1:
+                self.shuffle_history_pos += 1
+                self.current_index = self.shuffle_history[self.shuffle_history_pos]
+                return
+            if not self.unplayed_indices:
+                # Đã random hết 1 lượt toàn bộ playlist -> random lại vòng mới
+                self._reset_unplayed_indices()
+            if not self.unplayed_indices:
+                return
+            self.current_index = self.unplayed_indices.pop()
+            self.shuffle_history.append(self.current_index)
+            self.shuffle_history_pos = len(self.shuffle_history) - 1
+        else:
+            if self.shuffle_history_pos > 0:
+                self.shuffle_history_pos -= 1
+                self.current_index = self.shuffle_history[self.shuffle_history_pos]
+            # Nếu chưa có lịch sử để lùi thì giữ nguyên bài hiện tại (không có gì để Prev)
 
     def mute(self):
         if self.is_muted:
@@ -1028,7 +1166,10 @@ class MainWindow(MSFluentWindow):
                     elif self.repeat_mode == "all":
                         self.next_song()
                     else:
-                        if self.playlist and self.current_index < len(self.playlist) - 1:
+                        # repeat off: chỉ next tiếp nếu còn bài chưa nghe
+                        has_more = (bool(self.unplayed_indices) if self.shuffle_mode
+                                    else self.current_index < len(self.playlist) - 1)
+                        if self.playlist and has_more:
                             self.next_song()
                         else:
                             self.stop_song()
@@ -1086,6 +1227,36 @@ class MainWindow(MSFluentWindow):
         self.activateWindow()
         if file_path:
             self._handle_startup_file(file_path)
+
+    def _reset_unplayed_indices(self):
+        """Khởi tạo lại danh sách các bài chưa phát ngoại trừ bài hiện tại."""
+        if not self.playlist:
+            self.unplayed_indices = []
+            return
+        self.unplayed_indices = [i for i in range(len(self.playlist)) if i != self.current_index]
+        random.shuffle(self.unplayed_indices)
+
+    def toggle_shuffle(self):
+        """Bật / Tắt Chế độ Shuffle."""
+        self.shuffle_mode = not self.shuffle_mode
+        
+        if self.shuffle_mode:
+            self._reset_unplayed_indices()
+            self.shuffle_history = [self.current_index] if self.current_index != -1 else []
+            self.shuffle_history_pos = len(self.shuffle_history) - 1
+            self.shuffle_btn.setToolTip("Shuffle: On (Play all tracks once)")
+            # Đổi sang icon active (không cần phân biệt theme)
+            active_icon = QIcon(resource_path("assets/icons/shuffle_active.png"))
+            self.shuffle_btn.setIcon(active_icon)
+        else:
+            self.unplayed_indices = []
+            self.shuffle_history = []
+            self.shuffle_history_pos = -1
+            self.shuffle_btn.setToolTip("Shuffle: Off")
+            # Trả lại icon theo theme hiện tại
+            theme_suffix = 'dark' if isDarkTheme() else 'light'
+            normal_icon = QIcon(resource_path(f"assets/icons/shuffle_{theme_suffix}.png"))
+            self.shuffle_btn.setIcon(normal_icon)
 
 
 def main():
