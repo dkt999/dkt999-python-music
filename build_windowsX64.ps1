@@ -1,11 +1,6 @@
 <#
 .SYNOPSIS
     build_win.ps1 - Đóng gói DK Music Player v1.0 thành file .exe trên Windows bằng PowerShell.
-
-.DESCRIPTION
-    Script này tự động quản lý version (VERSION.txt), dọn dẹp các tệp build cũ,
-    gọi PyInstaller build binary DKMusicPlayer.exe (kèm PyQt6, QFluentWidgets, Pygame, Mutagen) 
-    và dùng Inno Setup tạo file cài đặt .exe tự động.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -22,7 +17,6 @@ if (-not (Test-Path $EntryPoint)) {
     exit 1
 }
 
-# --- Quản lý & Tự động tăng Version ---
 Write-Host "==> [2/6] Quan ly phien ban (Auto-increment Version)..." -ForegroundColor Cyan
 if (-not (Test-Path $VersionFile)) {
     "1.0.0" | Out-File -FilePath $VersionFile -Encoding utf8
@@ -53,7 +47,7 @@ if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
 if (Test-Path "dist") { Remove-Item -Recurse -Force "dist" }
 if (Test-Path "$AppName.spec") { Remove-Item -Force "$AppName.spec" }
 
-Write-Host "==> [5/6] Build $AppName.exe bang PyInstaller..." -ForegroundColor Cyan
+Write-Host "==> [5/6] Build $AppName.exe v1.0 bang PyInstaller..." -ForegroundColor Cyan
 pyinstaller `
     --name "$AppName" `
     --onefile `
@@ -83,7 +77,6 @@ if (-not (Test-Path $ISCC)) {
 if (-not (Test-Path $ISCC)) {
     Write-Host ""
     Write-Host "Khong tim thay Inno Setup 6 bang duong dan mac dinh." -ForegroundColor Yellow
-    Write-Host "Hay cai Inno Setup 6 de tao file cai dat Setup.exe." -ForegroundColor Yellow
     Write-Host "File Portable EXE van co san tai: dist\$AppName.exe" -ForegroundColor Green
     exit 0
 }
@@ -102,10 +95,7 @@ $SetupFileName = "${PackageId}_${Version}_${Arch}.exe"
 
 Write-Host ""
 Write-Host "=============================================" -ForegroundColor Green
-Write-Host "BUILD WINDOWS THANH CONG" -ForegroundColor Green
-Write-Host ""
-Write-Host "Portable EXE :" -NoNewline
-Write-Host " dist\$AppName.exe" -ForegroundColor Yellow
-Write-Host "Setup EXE    :" -NoNewline
-Write-Host " $OutDir\$SetupFileName" -ForegroundColor Yellow
+Write-Host "BUILD WINDOWS THANH CONG (DK Music Player v1.0)" -ForegroundColor Green
+Write-Host "Portable EXE : dist\$AppName.exe" -ForegroundColor Yellow
+Write-Host "Setup EXE    : $OutDir\$SetupFileName" -ForegroundColor Yellow
 Write-Host "=============================================" -ForegroundColor Green
