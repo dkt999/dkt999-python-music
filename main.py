@@ -333,6 +333,7 @@ class MarkerSlider(Slider):
 class PlaylistWindow(MSFluentWindow):
     def __init__(self, player):
         super().__init__()
+        self.setMicaEffectEnabled(False)
         self.player = player
         self.setWindowTitle("Playlist")
         self.setWindowIcon(get_app_icon())
@@ -341,7 +342,6 @@ class PlaylistWindow(MSFluentWindow):
         self.titleBar.minBtn.hide()
         # Hide navigation sidebar
         self.navigationInterface.hide()
-
         # Layout & UI
         container = QWidget(self)
         layout = QVBoxLayout(container)
@@ -423,10 +423,17 @@ class PlaylistWindow(MSFluentWindow):
 class SettingsWindow(MSFluentWindow):
     def __init__(self):
         super().__init__()
+        # --- FIX CHỚP TRẮNG TRÊN WINDOWS ---
+        palette = self.palette()
+        # Màu 32,32,32 là màu nền tối mặc định của QFluentWidgets
+        bg_color = QColor(32, 32, 32) if isDarkTheme() else QColor(243, 243, 243)
+        palette.setColor(self.backgroundRole(), bg_color)
+        self.setPalette(palette)
+        # -----------------------------------
+        self.setMicaEffectEnabled(False) 
         self.setWindowTitle("Settings")
         self.setWindowIcon(get_app_icon())
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
-        self.setFixedSize(620, 320)
+        self.setFixedSize(620, 420)
         self.titleBar.maxBtn.hide()
         self.titleBar.minBtn.hide()
 
@@ -435,12 +442,15 @@ class SettingsWindow(MSFluentWindow):
 
         # Layout & Content
         container = QWidget(self)
+        container.setStyleSheet("QWidget{background: transparent}")
         layout = QVBoxLayout(container)
         layout.setContentsMargins(10, 10, 10, 10)
 
         scroll = ScrollArea(container)
+        scroll.setStyleSheet("QScrollArea{border: none; background: transparent}")
         scroll.setWidgetResizable(True)
         content = QWidget()
+        content.setStyleSheet("QWidget{background: transparent}")
         v = QVBoxLayout(content)
 
         group = SettingCardGroup("General", content)
@@ -452,7 +462,7 @@ class SettingsWindow(MSFluentWindow):
             texts=["Always ask", "Play entire folder", "Play selected file only"],
         )
         group.addSettingCard(open_mode_card)
-
+        open_mode_card.setExpand(True)
         bg_card = SwitchSettingCard(
             FIF.MINIMIZE,
             "Run in background on close",
@@ -481,6 +491,7 @@ class SettingsWindow(MSFluentWindow):
 class MainWindow(MSFluentWindow):
     def __init__(self, startup_file=None):
         super().__init__()
+        self.setMicaEffectEnabled(False)
         self.setWindowTitle("DK Music Player")
         app_icon = get_app_icon()
         self.setWindowIcon(app_icon)
@@ -514,6 +525,13 @@ class MainWindow(MSFluentWindow):
         self.tray = None
         self.playlist_win = None
         self.settings_win = None
+        # Windows fix: HWND của cửa sổ con luôn được hệ điều hành vẽ nền
+        # trắng mặc định trước khi QFluentWidgets kịp áp theme tối lên, gây
+        # chớp trắng khi show() lần đầu (rõ nhất ở SettingsWindow/PlaylistWindow
+        # vì UI của chúng dựng lâu hơn cửa sổ chính). Dựng sẵn 2 cửa sổ này
+        # ngay khi app khởi động (ẩn đi ngay) để "trả" chi phí dựng UI +
+        # native paint đó 1 lần lúc mở app, thay vì lúc người dùng bấm mở.
+        #QTimer.singleShot(0, self._prewarm_child_windows)
 
         # Container holding all UI elements
         self.main_container = QWidget(self)
@@ -564,10 +582,39 @@ class MainWindow(MSFluentWindow):
         act_playlist.triggered.connect(self.toggle_playlist_window)
         view_menu.addAction(act_playlist)
 
+    def _prewarm_child_windows(self):
+        """
+        Dựng trước SettingsWindow/PlaylistWindow rồi show()->hide() ngay,
+        thay vì đợi tới lúc người dùng bấm mở. windowOpacity(0) đảm bảo
+        không có khung hình nào của lần show() "khởi động" này lọt ra
+        màn hình. Từ lần sau, open_settings()/toggle_playlist_window() chỉ
+        show() lại instance đã dựng + đã paint sẵn nên không còn flash.
+        """
+        if self.settings_win is None:
+            self.settings_win = SettingsWindow()
+            self.settings_win.setWindowOpacity(0)
+            self.settings_win.show()
+            self.settings_win.hide()
+            self.settings_win.setWindowOpacity(1)
+
+        if self.playlist_win is None:
+            self.playlist_win = PlaylistWindow(self)
+            self.playlist_win.update_playlist_ui()
+            self.playlist_win.setWindowOpacity(0)
+            self.playlist_win.show()
+            self.playlist_win.hide()
+            self.playlist_win.setWindowOpacity(1)
+
     def open_settings(self):
         if self.settings_win is None:
             self.settings_win = SettingsWindow()
-        self.settings_win.show()
+            
+        if not self.settings_win.isVisible():
+            # Kỹ thuật chống chớp: Ép trong suốt -> Show (vẽ ngầm) -> Đợi 40ms -> Hiện lại
+            self.settings_win.setWindowOpacity(0)
+            self.settings_win.show()
+            QTimer.singleShot(40, lambda: self.settings_win.setWindowOpacity(1))
+            
         self.settings_win.raise_()
         self.settings_win.activateWindow()
 
@@ -736,6 +783,17 @@ class MainWindow(MSFluentWindow):
     def apply_theme(self, theme):
         setTheme(theme)
         self._style_play_button()
+        bg_color = QColor(32, 32, 32) if isDarkTheme() else QColor(243, 243, 243)
+        if self.settings_win is not None:
+            pal = self.settings_win.palette()
+            pal.setColor(self.settings_win.backgroundRole(), bg_color)
+            self.settings_win.setPalette(pal)
+            
+        if self.playlist_win is not None:
+            pal = self.playlist_win.palette()
+            pal.setColor(self.playlist_win.backgroundRole(), bg_color)
+            self.playlist_win.setPalette(pal)
+
         self.stop_btn.setIcon(QIcon(resource_path(
             f"assets/icons/stop_{'dark' if isDarkTheme() else 'light'}.png")))
         self.prev_btn.setIcon(QIcon(resource_path(
@@ -757,11 +815,16 @@ class MainWindow(MSFluentWindow):
         if self.playlist_win is None:
             self.playlist_win = PlaylistWindow(self)
             self.playlist_win.update_playlist_ui()
+            
         if self.playlist_win.isVisible():
             self.playlist_win.hide()
         else:
+            # Kỹ thuật chống chớp khi re-show
+            self.playlist_win.setWindowOpacity(0)
             self.playlist_win.show()
+            QTimer.singleShot(40, lambda: self.playlist_win.setWindowOpacity(1))
             self.playlist_win.raise_()
+            self.playlist_win.activateWindow()
 
     # ---------- Startup File Handling ----------
     def _handle_startup_file(self, path):
