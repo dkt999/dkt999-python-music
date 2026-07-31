@@ -1,6 +1,6 @@
 #define AppName "DK Music Player v1.0"
 #define AppVersion "1.0.0"
-#define AppPublisher "Dinh Kim Thach"
+#define AppPublisher "Dinh Kim Thach (dinhkimthach.name.vn)"
 #define AppExeName "DKMusicPlayer.exe"
 
 #define PackageId "dk-music-player"
