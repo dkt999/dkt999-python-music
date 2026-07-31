@@ -10,7 +10,7 @@ import sys
 import time
 import random
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QRectF
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QRectF, QSize
 from PyQt6.QtGui import QIcon, QPainter, QColor, QFont, QAction, QActionGroup
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
@@ -43,6 +43,54 @@ try:
 except ImportError:
     HAS_MUTAGEN = False
 
+class PrimaryPlayButton(PushButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.is_playing = False
+        self.setFixedSize(40, 40)
+
+    def set_playing(self, playing: bool):
+        self.is_playing = playing
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # 1. Vẽ nền tròn cyan
+        c = themeColor()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        p.drawEllipse(0, 0, self.width(), self.height())
+
+        # 2. Tọa độ tâm
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+
+        p.setBrush(QColor("white"))
+
+        if self.is_playing:
+            # --- VẼ ICON PAUSE (2 thanh đứng căn chuẩn đét) ---
+            w, h = 3.5, 12.0  # Độ rộng và độ cao 2 thanh
+            gap = 3.5         # Khoảng cách giữa 2 thanh
+            
+            x1 = cx - gap / 2.0 - w
+            x2 = cx + gap / 2.0
+            y = cy - h / 2.0
+
+            p.drawRoundedRect(QRectF(x1, y, w, h), 1.5, 1.5)
+            p.drawRoundedRect(QRectF(x2, y, w, h), 1.5, 1.5)
+        else:
+            # --- VẼ ICON PLAY (Tam giác căn chuẩn tâm) ---
+            from PyQt6.QtGui import QPolygonF
+            from PyQt6.QtCore import QPointF
+            
+            # Đã offset nhẹ 0.5px để tam giác nhìn cân thị giác
+            poly = QPolygonF([
+                QPointF(cx - 4, cy - 6),
+                QPointF(cx - 4, cy + 6),
+                QPointF(cx + 6, cy)
+            ])
+            p.drawPolygon(poly)
 
 class VolumeSlider(Slider):
     """
@@ -533,11 +581,7 @@ class MainWindow(MSFluentWindow):
         self.prev_btn.clicked.connect(self.prev_song)
         controls.addWidget(self.prev_btn)
 
-        self.play_btn = PushButton()
-        self.play_btn.setFixedSize(44, 44)
-        self.play_btn.setIcon(FIF.PLAY.icon(color=QColor("white")))
-        self.play_btn.setIconSize(self.play_btn.iconSize())
-        self._style_play_button()
+        self.play_btn = PrimaryPlayButton()
         self.play_btn.clicked.connect(self.toggle_play)
         controls.addWidget(self.play_btn)
 
@@ -623,8 +667,11 @@ class MainWindow(MSFluentWindow):
 
     def _style_play_button(self):
         c = themeColor().name()
+        # Chỉnh padding: 0px và set iconSize chuẩn để icon luôn vào chính giữa tâm nút
+        self.play_btn.setFixedSize(40, 40)
+        self.play_btn.setIconSize(QSize(20, 20))
         self.play_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {c}; border-radius: 22px; border: none; }}"
+            f"QPushButton {{ background-color: {c}; border-radius: 20px; border: none; padding: 0px; }}"
             f"QPushButton:hover {{ background-color: {c}; }}"
         )
 
@@ -756,7 +803,7 @@ class MainWindow(MSFluentWindow):
         self.manually_stopped = False
         self.offset = 0
         self.start_time = time.time()
-        self.play_btn.setIcon(FIF.PAUSE.icon(color=QColor("white")))
+        self.play_btn.set_playing(True)
         self.equalizer.set_playing(True)
 
         display = get_display_title(path)
@@ -793,14 +840,14 @@ class MainWindow(MSFluentWindow):
             pygame.mixer.music.unpause()
             self.paused = False
             self.start_time = time.time() - self.offset
-            self.play_btn.setIcon(FIF.PAUSE.icon(color=QColor("white")))
+            self.play_btn.set_playing(True)
             self.equalizer.set_playing(True)
         else:
             if pygame.mixer.music.get_busy():
                 pygame.mixer.music.pause()
                 self.paused = True
                 self.offset = time.time() - self.start_time
-                self.play_btn.setIcon(FIF.PLAY.icon(color=QColor("white")))
+                self.play_btn.set_playing(False)
                 self.equalizer.set_playing(False)
             else:
                 self._play_current()
@@ -808,7 +855,7 @@ class MainWindow(MSFluentWindow):
     def stop_song(self):
         self.manually_stopped = True
         pygame.mixer.music.stop()
-        self.play_btn.setIcon(FIF.PLAY.icon(color=QColor("white")))
+        self.play_btn.set_playing(False)
         self.equalizer.set_playing(False)
         self.marquee.set_text("No track playing")
         self.time_label.setText("00:00 / 00:00")
