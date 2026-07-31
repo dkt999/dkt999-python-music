@@ -1,21 +1,21 @@
-#define AppName "DK Clock v1.0"
+#define AppName "DK Music Player"
 #define AppVersion "1.0.0"
-#define AppPublisher "Dinh Kim Thach (dinhkimthach.name.vn)"
-#define AppExeName "DKClock.exe"
+#define AppPublisher "Dinh Kim Thach"
+#define AppExeName "DKMusicPlayer.exe"
 
-; Tên file .exe đầu ra: dk-clock_<version>_amd64.exe
-#define PackageId "dk-clock"
+; Tên file .exe đầu ra: dk-music-player_<version>_amd64.exe
+#define PackageId "dk-music-player"
 #define Arch "amd64"
 #ifndef BuildVersion
   #define BuildVersion "1.0.0"
 #endif
 
 [Setup]
-AppId={{DKClock_SingleInstance_AppID}}
+AppId={{DKMusicPlayer_SingleInstance_AppID}}
 AppName={#AppName}
 AppVersion={#BuildVersion}
 AppPublisher={#AppPublisher}
-DefaultDirName={autopf}\DKClock
+DefaultDirName={autopf}\DKMusicPlayer
 DefaultGroupName={#AppName}
 ; PrivilegesRequired=lowest giúp cài cho riêng user hiện tại, không bắt buộc quyền Admin/UAC
 PrivilegesRequired=lowest

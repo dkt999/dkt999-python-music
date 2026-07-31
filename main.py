@@ -392,16 +392,16 @@ class SettingsWindow(MSFluentWindow):
 class MainWindow(MSFluentWindow):
     def __init__(self, startup_file=None):
         super().__init__()
-        self.setWindowTitle("Music Player")
+        self.setWindowTitle("DK Music Player")
         app_icon = get_app_icon()
         self.setWindowIcon(app_icon)
         self.resize(640, 260)
-        self.setMinimumSize(680, 240)
+        self.setFixedSize(680, 240)
         self.is_muted = False
         saved_vol = cfg.volume.value
         self.last_volume = saved_vol if saved_vol > 0 else 70
         self.volume = saved_vol / 100.0
-        
+        self.titleBar.maxBtn.hide()
         # Hide sidebar and back button from Title Bar
         self.navigationInterface.hide()
 
@@ -879,7 +879,7 @@ class MainWindow(MSFluentWindow):
             self.is_muted = True
             mute_icon = get_action_icon("mute.png", FIF.MUTE)
             self.vol_icon.setIcon(mute_icon)
-            
+
         cfg.set(cfg.volume, val)
 
     def _seek_to(self, seconds):
@@ -994,7 +994,7 @@ class MainWindow(MSFluentWindow):
         icon_path = resource_path("assets/icon.png")
         icon = QIcon(icon_path) if os.path.exists(icon_path) else self.windowIcon()
         self.tray = QSystemTrayIcon(icon, self)
-        self.tray.setToolTip("Music Player")
+        self.tray.setToolTip("DK Music Player")
         menu = QMenu()
         act_show = menu.addAction("Restore Window")
         act_show.triggered.connect(self._restore_from_tray)

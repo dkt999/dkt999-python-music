@@ -1,16 +1,16 @@
 <#
 .SYNOPSIS
-    build_win.ps1 - Đóng gói DK Clock v1.0 thành file .exe trên Windows bằng PowerShell.
+    build_win.ps1 - Đóng gói DK Music Player v1.0 thành file .exe trên Windows bằng PowerShell.
 
 .DESCRIPTION
     Script này tự động quản lý version (VERSION.txt), dọn dẹp các tệp build cũ,
-    gọi PyInstaller build binary DKClock.exe (kèm PyQt6, QFluentWidgets, QtMultimedia) 
-    và dùng Inno Setup tạo file cài đặt .exe tự động tăng version.
+    gọi PyInstaller build binary DKMusicPlayer.exe (kèm PyQt6, QFluentWidgets, Pygame, Mutagen) 
+    và dùng Inno Setup tạo file cài đặt .exe tự động.
 #>
 
 $ErrorActionPreference = "Stop"
 
-$AppName = "DKClock"
+$AppName = "DKMusicPlayer"
 $EntryPoint = "main.py"
 $IconPath = "assets\icon.ico"
 $AssetsDir = "assets"
@@ -41,7 +41,12 @@ Write-Host "    Version moi: $Version" -ForegroundColor Green
 
 Write-Host "==> [3/6] Kiem tra va cap nhat thu vien can thiet..." -ForegroundColor Cyan
 python -m pip install --upgrade pip -q
-python -m pip install pyinstaller PyQt6 PyQt6-Fluent-Widgets -q
+if (Test-Path "requirements.txt") {
+    python -m pip install -r requirements.txt -q
+} else {
+    python -m pip install PyQt6 PyQt6-Fluent-Widgets pygame mutagen -q
+}
+python -m pip install pyinstaller -q
 
 Write-Host "==> [4/6] Don dep cac tep build cu..." -ForegroundColor Cyan
 if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
@@ -57,9 +62,10 @@ pyinstaller `
     --add-data "$AssetsDir;$AssetsDir" `
     --hidden-import="PyQt6.QtSvg" `
     --hidden-import="PyQt6.QtNetwork" `
-    --hidden-import="PyQt6.QtMultimedia" `
-    --hidden-import="PyQt6.QtMultimediaWidgets" `
+    --hidden-import="pygame" `
+    --hidden-import="mutagen" `
     --collect-all="qfluentwidgets" `
+    --collect-all="pygame" `
     "$EntryPoint"
 
 Write-Host ""
@@ -82,7 +88,7 @@ if (-not (Test-Path $ISCC)) {
     exit 0
 }
 
-$PackageId = "dk-clock"
+$PackageId = "dk-music-player"
 $Arch = "amd64"
 $OutDir = "installer\windows"
 
