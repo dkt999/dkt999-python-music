@@ -1461,9 +1461,6 @@ class MainWindow(MSFluentWindow):
             if self.playlist_win is not None:
                 self.playlist_win.hide()
             self.tray.show()
-            self.tray.showMessage("Playing audio in background",
-                                   "Click system tray icon to restore window.",
-                                   QSystemTrayIcon.MessageIcon.Information, 4000)
         else:
             e.ignore()
             self.showMinimized()
