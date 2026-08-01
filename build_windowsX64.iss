@@ -46,6 +46,12 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 Root: HKCU; Subkey: "Software\Classes\{#AppProgID}"; ValueType: string; ValueName: ""; ValueData: "Audio File ({#AppName})"; Flags: uninsdeletekey; Tasks: associate_audio
 Root: HKCU; Subkey: "Software\Classes\{#AppProgID}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExeName},0"; Tasks: associate_audio
 Root: HKCU; Subkey: "Software\Classes\{#AppProgID}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; Tasks: associate_audio
+; MultiSelectModel=Player: khi người dùng chọn NHIỀU file rồi "Open with", giá trị
+; này báo cho Windows Explorer gộp toàn bộ file đã chọn vào 1 lần launch app duy
+; nhất (truyền hết qua tham số dòng lệnh), thay vì mặc định (Single) là mở riêng
+; 1 process cho từng file. Đây là nguyên nhân khiến app trước đây chỉ nhận được
+; đúng 1 file mỗi khi mở nhiều file cùng lúc trên Windows.
+Root: HKCU; Subkey: "Software\Classes\{#AppProgID}\shell\open"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"; Tasks: associate_audio
 
 ; 2. Đăng ký Open With cho từng định dạng audio cụ thể
 Root: HKCU; Subkey: "Software\Classes\.mp3\OpenWithProgids"; ValueType: string; ValueName: "{#AppProgID}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: associate_audio

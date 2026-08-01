@@ -1496,26 +1496,58 @@ def _send_to_running_instance(socket, startup_files, skip_ask):
     socket.disconnectFromServer()
 
 
+def _try_connect_running_instance(timeout_ms=200):
+    """Thử connect tới instance đang chạy (nếu có). Trả về socket đã
+    connected, hoặc None nếu không có ai đang chạy trong khoảng timeout."""
+    sock = QLocalSocket()
+    sock.connectToServer(IPC_SERVER_NAME)
+    if sock.waitForConnected(timeout_ms):
+        return sock
+    sock.close()
+    return None
+
+
 def main():
     startup_files, skip_ask = _expand_startup_args(sys.argv[1:])
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
-    probe = QLocalSocket()
-    probe.connectToServer(IPC_SERVER_NAME)
-    if probe.waitForConnected(200):
-        _send_to_running_instance(probe, startup_files, skip_ask)
+    # --- Bầu ai là "primary" ---
+    # Trên Windows, khi người dùng chọn nhiều file rồi "Open with", Explorer
+    # có thể tạo NHIỀU process gần như cùng lúc (mỗi process 1 file, do
+    # MultiSelectModel mặc định của Windows là "Single" chứ không gộp thành
+    # 1 lần launch như Nautilus trên Ubuntu). Nếu process đầu tiên khởi động
+    # chậm (PyInstaller giải nén + import PyQt6/pygame/qfluentwidgets có thể
+    # mất hơn 200ms, đặc biệt lần chạy đầu hoặc máy có antivirus quét exe),
+    # 1 lần thử connect 200ms là không đủ và các process sau sẽ tưởng lầm là
+    # chưa có ai chạy rồi tự trở thành primary riêng -> mỗi process mở 1 cửa
+    # sổ với đúng 1 file, kể cả khi mở nhiều file cùng lúc. Ở đây ta poll lặp
+    # lại trong tối đa ~3 giây thay vì chỉ thử 1 lần.
+    sock = _try_connect_running_instance(200)
+    if sock is None:
+        for _ in range(14):  # 14 x 200ms ~= 2.8s tổng cộng
+            time.sleep(0.2)
+            sock = _try_connect_running_instance(200)
+            if sock is not None:
+                break
+    if sock is not None:
+        _send_to_running_instance(sock, startup_files, skip_ask)
         return
-    probe.close()
 
     QLocalServer.removeServer(IPC_SERVER_NAME)
     ipc_server = QLocalServer()
     if not ipc_server.listen(IPC_SERVER_NAME):
-        retry = QLocalSocket()
-        retry.connectToServer(IPC_SERVER_NAME)
-        if retry.waitForConnected(200):
-            _send_to_running_instance(retry, startup_files, skip_ask)
+        # Có process khác vừa thắng trong lúc ta đang poll ở trên -> gửi file
+        # cho họ thay vì tự mở cửa sổ mới. Cũng poll lặp lại cho chắc.
+        retry_sock = None
+        for _ in range(10):  # ~2s
+            retry_sock = _try_connect_running_instance(200)
+            if retry_sock is not None:
+                break
+            time.sleep(0.2)
+        if retry_sock is not None:
+            _send_to_running_instance(retry_sock, startup_files, skip_ask)
         return
 
     setTheme(cfg.themeMode.value)
