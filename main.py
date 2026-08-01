@@ -33,9 +33,9 @@ import pygame
 
 SUPPORTED_EXT = (".mp3", ".ogg", ".wav", ".flac")
 
-CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "gon_nhe_music_player")
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "dk_music_player")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config_qt.json")
-IPC_SERVER_NAME = "gon_nhe_music_player_single_instance"
+IPC_SERVER_NAME = "dk_music_player_single_instance"
 
 try:
     from mutagen import File as MutagenFile
