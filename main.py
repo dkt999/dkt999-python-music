@@ -1491,15 +1491,12 @@ def _send_to_running_instance(socket, startup_files, skip_ask):
     prefix = "D" if skip_ask else "F"
     payload = prefix + "\n" + "\n".join(startup_files)
     socket.write(payload.encode("utf-8"))
-    socket.waitForBytesWritten(200)
+    socket.flush()  # Đẩy dữ liệu đi ngay
+    socket.waitForBytesWritten(1000)  # Tăng timeout an toàn cho Windows
     socket.disconnectFromServer()
 
 
 def main():
-    # Gom TẤT CẢ tham số truyền vào qua argv (không chỉ argv[1]) — hữu ích khi
-    # OS truyền nhiều file/thư mục trong cùng 1 lần gọi process. Hỗ trợ cả
-    # trường hợp argv là 1 thư mục (vd Ubuntu "Open Folder With...") bằng
-    # cách quét toàn bộ nhạc bên trong thư mục đó.
     startup_files, skip_ask = _expand_startup_args(sys.argv[1:])
 
     app = QApplication(sys.argv)
@@ -1512,19 +1509,9 @@ def main():
         return
     probe.close()
 
-    # QUAN TRỌNG: "chiếm" server ngay lập tức, TRƯỚC khi dựng MainWindow
-    # (bước dựng UI + init pygame mixer khá nặng, có thể mất vài trăm ms).
-    # Nếu để listen() sau khi dựng xong UI như code cũ, khi người dùng mở
-    # nhiều file cùng lúc (OS spawn nhiều process gần như đồng thời), các
-    # process khác sẽ probe không thấy ai đang listen -> mỗi process tự
-    # nhận mình là primary -> ra nhiều cửa sổ, mỗi cửa sổ chỉ nhận 1 file.
-    # Thu hẹp khoảng thời gian giữa "probe fail" và "listen" về gần như 0
-    # sẽ giảm mạnh race window đó.
     QLocalServer.removeServer(IPC_SERVER_NAME)
     ipc_server = QLocalServer()
     if not ipc_server.listen(IPC_SERVER_NAME):
-        # Cực hiếm: có instance khác vừa kịp listen() giữa lúc ta probe và
-        # lúc ta listen. Thử làm secondary lần nữa thay vì crash/im lặng thoát.
         retry = QLocalSocket()
         retry.connectToServer(IPC_SERVER_NAME)
         if retry.waitForConnected(200):
@@ -1536,14 +1523,17 @@ def main():
 
     win = MainWindow(startup_file=startup_files, skip_ask=skip_ask)
 
+    # --- XỬ LÝ IPC MULTI-CONNECTION HOÀN CHỈNH ---
     def _on_new_ipc_connection():
-        sock = ipc_server.nextPendingConnection()
-        if sock is None:
-            return
-        if sock.waitForReadyRead(300):
-            data = bytes(sock.readAll()).decode("utf-8")
-            win.handle_ipc_message(data if data else None)
-        sock.disconnectFromServer()
+        while ipc_server.hasPendingConnections():
+            sock = ipc_server.nextPendingConnection()
+            if sock is None:
+                continue
+            if sock.waitForReadyRead(500):
+                data = bytes(sock.readAll()).decode("utf-8")
+                if data:
+                    win.handle_ipc_message(data)
+            sock.disconnectFromServer()
 
     ipc_server.newConnection.connect(_on_new_ipc_connection)
     win._ipc_server = ipc_server
