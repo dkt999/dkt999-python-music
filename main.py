@@ -6,6 +6,7 @@ interface (built-in Light/Dark themes, Fluent icons, native Qt system tray).
 """
 
 import os
+import re
 import sys
 import time
 import random
@@ -32,6 +33,33 @@ from qfluentwidgets import (
 import pygame
 
 SUPPORTED_EXT = (".mp3", ".ogg", ".wav", ".flac")
+
+
+def _natural_key(path):
+    """Sort key giúp 'Track 2.mp3' đứng trước 'Track 10.mp3' (thay vì string
+    sort thô sẽ cho ra thứ tự 10, 2, 3...)."""
+    name = os.path.basename(path).lower()
+    return [int(tok) if tok.isdigit() else tok for tok in re.split(r"(\d+)", name)]
+
+
+def _expand_startup_args(args):
+    """Nhận danh sách argv (có thể là file lẻ hoặc cả thư mục, ví dụ khi mở
+    bằng 'Open Folder With...' trên Ubuntu) và trả về:
+    (danh sách file nhạc đã sort tự nhiên, có phải mở từ thư mục hay không).
+    """
+    files = []
+    had_dir = False
+    for a in args:
+        if os.path.isdir(a):
+            had_dir = True
+            for root_dir, _, fnames in os.walk(a):
+                matched = [f for f in fnames if f.lower().endswith(SUPPORTED_EXT)]
+                for f in sorted(matched, key=_natural_key):
+                    files.append(os.path.join(root_dir, f))
+        elif os.path.isfile(a) and a.lower().endswith(SUPPORTED_EXT):
+            files.append(a)
+    files = sorted(dict.fromkeys(os.path.abspath(f) for f in files), key=_natural_key)
+    return files, had_dir
 
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "dk_music_player")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config_qt.json")
@@ -209,7 +237,7 @@ class Config(QConfig):
     # Ghi đè màu accent mặc định (chỉ áp dụng cho lần chạy đầu tiên, khi
     # chưa có trong config_qt.json). Sau khi người dùng đổi màu trong Settings,
     # giá trị này không còn được dùng nữa — file config sẽ quyết định.
-    themeColor = ColorConfigItem("General", "ThemeColor", "#0A6455")
+    themeColor = ColorConfigItem("General", "ThemeColor", "#FA5053")
 
 
 cfg = Config()
@@ -529,7 +557,7 @@ class SettingsWindow(MSFluentWindow):
 # Main Window
 # ============================================================================
 class MainWindow(MSFluentWindow):
-    def __init__(self, startup_file=None):
+    def __init__(self, startup_file=None, skip_ask=False):
         super().__init__()
         self.setMicaEffectEnabled(False)
         self.setWindowTitle("DK Music Player")
@@ -590,8 +618,20 @@ class MainWindow(MSFluentWindow):
         self.timer.timeout.connect(self._update_loop)
         self.timer.start(200)
         cfg.themeColorChanged.connect(self._on_theme_color_changed)
+
+        # Hàng đợi + debounce cho file khởi động: khi mở nhiều file cùng lúc,
+        # OS có thể spawn nhiều process gửi file tới lần lượt qua IPC. Nếu xử
+        # lý (và play) ngay mỗi lần nhận 1 file, file đến sau cùng (thứ tự
+        # ngẫu nhiên) sẽ "cướp" playback. Thay vào đó, gom hết file đến trong
+        # một khoảng ngắn thành 1 batch rồi mới xử lý/play 1 lần duy nhất.
+        self._pending_startup_files = []
+        self._pending_startup_skip_ask = False
+        self._startup_batch_timer = QTimer(self)
+        self._startup_batch_timer.setSingleShot(True)
+        self._startup_batch_timer.timeout.connect(self._flush_startup_batch)
+
         if startup_file:
-            QTimer.singleShot(200, lambda: self._handle_startup_file(startup_file))
+            self._queue_startup_files(startup_file, initial_delay=200, skip_ask=skip_ask)
 
     # ---------- Menu ----------
     def _build_menu(self):
@@ -889,16 +929,59 @@ class MainWindow(MSFluentWindow):
             self.playlist_win.activateWindow()
 
     # ---------- Startup File Handling ----------
-    def _handle_startup_file(self, path):
-        path = os.path.abspath(path)
-        if not os.path.isfile(path):
+    def _queue_startup_files(self, paths, initial_delay=None, skip_ask=False):
+        if isinstance(paths, str):
+            paths = [paths]
+        self._pending_startup_files.extend(p for p in paths if p)
+        if skip_ask:
+            self._pending_startup_skip_ask = True
+        # Mỗi lần có file mới tới, reset lại đồng hồ đếm 400ms — chỉ khi
+        # "im lặng" không có file nào tới thêm trong 400ms thì mới xử lý
+        # batch, để gom đủ hết các file được mở cùng lúc.
+        delay = initial_delay if initial_delay is not None else 400
+        self._startup_batch_timer.start(delay)
+
+    def _flush_startup_batch(self):
+        paths = self._pending_startup_files
+        skip_ask = self._pending_startup_skip_ask
+        self._pending_startup_files = []
+        self._pending_startup_skip_ask = False
+        if paths:
+            self._handle_startup_file(paths, skip_ask=skip_ask)
+
+    def _handle_startup_file(self, paths, skip_ask=False):
+        # Chấp nhận cả 1 path đơn (str, tương thích ngược) lẫn 1 danh sách nhiều path.
+        if isinstance(paths, str):
+            paths = [paths]
+        paths = [os.path.abspath(p) for p in paths if p]
+        paths = [p for p in paths if os.path.isfile(p)]
+        # Sắp xếp tự nhiên theo tên file để track 1 luôn được phát trước,
+        # bất kể thứ tự các process/IPC message gửi file tới primary.
+        paths = sorted(dict.fromkeys(paths), key=_natural_key)
+        if not paths:
             return
+        primary = paths[0]
+
+        if skip_ask:
+            # Người dùng mở thẳng 1 thư mục ("Open Folder With..." trên Ubuntu) —
+            # ý định đã rõ ràng là phát toàn bộ nhạc trong đó, không cần hỏi lại,
+            # và cũng không quét lại theo dirname(primary) vì paths ở đây đã là
+            # danh sách đầy đủ (kể cả thư mục con) được quét sẵn từ trước.
+            for p in paths:
+                self._add_to_playlist(p)
+            idx = self.playlist.index(primary) if primary in self.playlist else len(self.playlist) - 1
+            if idx >= 0:
+                self.current_index = idx
+                self._play_current()
+            return
+
         mode = cfg.openMode.value
         if mode == "ask":
             box = QMessageBox(self)
             box.setWindowTitle("Open Music")
+            extra = f" (+{len(paths) - 1} file khác)" if len(paths) > 1 else ""
             box.setText(f"Do you want to play all audio files in the folder containing:\n"
-                        f"{os.path.basename(path)}\n\nYes = Play entire folder\nNo = Play this file only")
+                        f"{os.path.basename(primary)}{extra}\n\nYes = Play entire folder\nNo = Play this file only")
             box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No |
                                     QMessageBox.StandardButton.Cancel)
             ans = box.exec()
@@ -907,12 +990,17 @@ class MainWindow(MSFluentWindow):
             mode = "folder" if ans == QMessageBox.StandardButton.Yes else "single"
 
         if mode == "folder":
-            folder = os.path.dirname(path)
+            folder = os.path.dirname(primary)
             self._scan_folder_into_playlist(folder)
-            idx = self.playlist.index(path) if path in self.playlist else (0 if self.playlist else -1)
+            # Các file nằm ngoài folder đó (hiếm khi xảy ra) vẫn được thêm vào playlist
+            for p in paths[1:]:
+                if os.path.dirname(p) != folder:
+                    self._add_to_playlist(p)
+            idx = self.playlist.index(primary) if primary in self.playlist else (0 if self.playlist else -1)
         else:
-            self._add_to_playlist(path)
-            idx = len(self.playlist) - 1
+            for p in paths:
+                self._add_to_playlist(p)
+            idx = self.playlist.index(primary) if primary in self.playlist else len(self.playlist) - 1
 
         if idx >= 0:
             self.current_index = idx
@@ -932,16 +1020,24 @@ class MainWindow(MSFluentWindow):
 
     def add_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Audio Folder")
-        if folder:
-            self._scan_folder_into_playlist(folder)
+        if not folder:
+            return
+        first_new_index = len(self.playlist)
+        self._scan_folder_into_playlist(folder)
+        if len(self.playlist) > first_new_index:
+            self.current_index = first_new_index
+            self._play_current()
 
     def _scan_folder_into_playlist(self, folder):
         for root_dir, _, files in os.walk(folder):
-            for f in sorted(files):
-                if f.lower().endswith(SUPPORTED_EXT):
-                    self._add_to_playlist(os.path.join(root_dir, f))
+            matched = [f for f in files if f.lower().endswith(SUPPORTED_EXT)]
+            for f in sorted(matched, key=_natural_key):
+                self._add_to_playlist(os.path.join(root_dir, f))
 
     def _add_to_playlist(self, path):
+        path = os.path.abspath(path)
+        if path in self.playlist:
+            return
         self.playlist.append(path)
         if self.playlist_win is not None:
             self.playlist_win.list_widget.addItem(os.path.basename(path))
@@ -1347,12 +1443,18 @@ class MainWindow(MSFluentWindow):
         cfg.save()
         QApplication.quit()
 
-    def handle_ipc_message(self, file_path):
+    def handle_ipc_message(self, message):
         self.showNormal()
         self.raise_()
         self.activateWindow()
-        if file_path:
-            self._handle_startup_file(file_path)
+        if not message:
+            return
+        lines = message.split("\n")
+        # Dòng đầu là cờ "D" (mở từ thư mục, skip dialog) hoặc "F" (file thường)
+        skip_ask = lines and lines[0] == "D"
+        paths = [p for p in lines[1:] if p] if lines and lines[0] in ("D", "F") else [p for p in lines if p]
+        if paths:
+            self._queue_startup_files(paths, skip_ask=skip_ask)
 
     def _reset_unplayed_indices(self):
         """Khởi tạo lại danh sách các bài chưa phát ngoại trừ bài hiện tại."""
@@ -1385,10 +1487,20 @@ class MainWindow(MSFluentWindow):
             self.shuffle_btn.setIcon(normal_icon)
 
 
+def _send_to_running_instance(socket, startup_files, skip_ask):
+    prefix = "D" if skip_ask else "F"
+    payload = prefix + "\n" + "\n".join(startup_files)
+    socket.write(payload.encode("utf-8"))
+    socket.waitForBytesWritten(200)
+    socket.disconnectFromServer()
+
+
 def main():
-    startup_file = None
-    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
-        startup_file = sys.argv[1]
+    # Gom TẤT CẢ tham số truyền vào qua argv (không chỉ argv[1]) — hữu ích khi
+    # OS truyền nhiều file/thư mục trong cùng 1 lần gọi process. Hỗ trợ cả
+    # trường hợp argv là 1 thư mục (vd Ubuntu "Open Folder With...") bằng
+    # cách quét toàn bộ nhạc bên trong thư mục đó.
+    startup_files, skip_ask = _expand_startup_args(sys.argv[1:])
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -1396,20 +1508,33 @@ def main():
     probe = QLocalSocket()
     probe.connectToServer(IPC_SERVER_NAME)
     if probe.waitForConnected(200):
-        probe.write((startup_file or "").encode("utf-8"))
-        probe.waitForBytesWritten(200)
-        probe.disconnectFromServer()
+        _send_to_running_instance(probe, startup_files, skip_ask)
         return
     probe.close()
+
+    # QUAN TRỌNG: "chiếm" server ngay lập tức, TRƯỚC khi dựng MainWindow
+    # (bước dựng UI + init pygame mixer khá nặng, có thể mất vài trăm ms).
+    # Nếu để listen() sau khi dựng xong UI như code cũ, khi người dùng mở
+    # nhiều file cùng lúc (OS spawn nhiều process gần như đồng thời), các
+    # process khác sẽ probe không thấy ai đang listen -> mỗi process tự
+    # nhận mình là primary -> ra nhiều cửa sổ, mỗi cửa sổ chỉ nhận 1 file.
+    # Thu hẹp khoảng thời gian giữa "probe fail" và "listen" về gần như 0
+    # sẽ giảm mạnh race window đó.
+    QLocalServer.removeServer(IPC_SERVER_NAME)
+    ipc_server = QLocalServer()
+    if not ipc_server.listen(IPC_SERVER_NAME):
+        # Cực hiếm: có instance khác vừa kịp listen() giữa lúc ta probe và
+        # lúc ta listen. Thử làm secondary lần nữa thay vì crash/im lặng thoát.
+        retry = QLocalSocket()
+        retry.connectToServer(IPC_SERVER_NAME)
+        if retry.waitForConnected(200):
+            _send_to_running_instance(retry, startup_files, skip_ask)
+        return
 
     setTheme(cfg.themeMode.value)
     setThemeColor(cfg.themeColor.value)
 
-    win = MainWindow(startup_file=startup_file)
-
-    QLocalServer.removeServer(IPC_SERVER_NAME)
-    ipc_server = QLocalServer()
-    ipc_server.listen(IPC_SERVER_NAME)
+    win = MainWindow(startup_file=startup_files, skip_ask=skip_ask)
 
     def _on_new_ipc_connection():
         sock = ipc_server.nextPendingConnection()
