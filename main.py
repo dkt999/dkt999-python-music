@@ -11,7 +11,7 @@ import time
 import random
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QRectF, QSize
-from PyQt6.QtGui import QIcon, QPainter, QColor, QFont, QAction, QActionGroup
+from PyQt6.QtGui import QIcon, QPainter, QColor, QFont, QAction, QPixmap
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
@@ -21,12 +21,12 @@ from PyQt6.QtWidgets import (
 
 from qfluentwidgets import (
     QConfig, ConfigItem, OptionsConfigItem, OptionsValidator, BoolValidator,
-    qconfig, setTheme, Theme, isDarkTheme, FluentIcon as FIF,
+    ColorConfigItem, qconfig, setTheme, Theme, isDarkTheme, FluentIcon as FIF,
     Slider, TransparentToolButton, ToolButton, PushButton, ListWidget,
     SettingCardGroup, SwitchSettingCard, OptionsSettingCard, ScrollArea,
     ExpandLayout, InfoBar, InfoBarPosition, BodyLabel, CaptionLabel,
-    RoundMenu, Action, themeColor,
-    MSFluentWindow  # Uses MSFluentWindow for standard Fluent Title Bar
+    RoundMenu, Action, themeColor,setThemeColor, 
+    MSFluentWindow, CustomColorSettingCard
 )
 
 import pygame
@@ -123,6 +123,35 @@ class VolumeSlider(Slider):
             return
         super().mouseMoveEvent(e)
 
+def get_tinted_icon(icon_path, size=24):
+    """
+    Load icon và tô màu nó bằng màu chủ đạo (themeColor) của app.
+    Hoạt động với cả .svg và .png (chỉ cần có nền trong suốt).
+    """
+    # Load icon gốc ra Pixmap
+    icon = QIcon(icon_path)
+    pixmap = icon.pixmap(QSize(size, size))
+    
+    # Tạo một Pixmap trống, trong suốt hoàn toàn với cùng kích thước
+    tinted_pixmap = QPixmap(pixmap.size())
+    tinted_pixmap.fill(Qt.GlobalColor.transparent)
+    
+    # Dùng QPainter để vẽ lại
+    painter = QPainter(tinted_pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    
+    # Bước 1: Vẽ cái bóng/khuôn của icon gốc lên
+    painter.drawPixmap(0, 0, pixmap)
+    
+    # Bước 2: Chỉnh mode thành SourceIn (Chỉ vẽ đè lên những điểm ảnh không trong suốt)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    
+    # Bước 3: Đổ màu accent (themeColor) lên toàn bộ
+    painter.fillRect(tinted_pixmap.rect(), themeColor())
+    painter.end()
+    
+    return QIcon(tinted_pixmap)
+
 def get_app_icon():
     """
     Ưu tiên lấy icon.ico hoặc icon.png trong thư mục assets.
@@ -177,6 +206,10 @@ class Config(QConfig):
     repeatMode = OptionsConfigItem("General", "RepeatMode", "off",
                                     OptionsValidator(["off", "all", "one"]))
     volume = ConfigItem("General", "Volume", 70)
+    # Ghi đè màu accent mặc định (chỉ áp dụng cho lần chạy đầu tiên, khi
+    # chưa có trong config_qt.json). Sau khi người dùng đổi màu trong Settings,
+    # giá trị này không còn được dùng nữa — file config sẽ quyết định.
+    themeColor = ColorConfigItem("General", "ThemeColor", "#0A6455")
 
 
 cfg = Config()
@@ -433,7 +466,7 @@ class SettingsWindow(MSFluentWindow):
         self.setMicaEffectEnabled(False) 
         self.setWindowTitle("Settings")
         self.setWindowIcon(get_app_icon())
-        self.setFixedSize(620, 420)
+        self.setFixedSize(620, 620)
         self.titleBar.maxBtn.hide()
         self.titleBar.minBtn.hide()
 
@@ -462,6 +495,13 @@ class SettingsWindow(MSFluentWindow):
             texts=["Always ask", "Play entire folder", "Play selected file only"],
         )
         group.addSettingCard(open_mode_card)
+        color_card = CustomColorSettingCard(
+            cfg.themeColor, # Tự động liên kết với biến themeColor mặc định của thư viện
+            FIF.PALETTE,
+            "Theme Color",
+            "Change the primary accent color of the application"
+        )
+        group.addSettingCard(color_card)
         open_mode_card.setExpand(True)
         bg_card = SwitchSettingCard(
             FIF.MINIMIZE,
@@ -549,7 +589,7 @@ class MainWindow(MSFluentWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update_loop)
         self.timer.start(200)
-
+        cfg.themeColorChanged.connect(self._on_theme_color_changed)
         if startup_file:
             QTimer.singleShot(200, lambda: self._handle_startup_file(startup_file))
 
@@ -604,6 +644,28 @@ class MainWindow(MSFluentWindow):
             self.playlist_win.show()
             self.playlist_win.hide()
             self.playlist_win.setWindowOpacity(1)
+
+    def _on_theme_color_changed(self, color):
+        # 1. Đồng bộ màu cho hệ thống (qfluentwidgets mặc định) và lưu ngay xuống file config.
+        # Lưu ý: setThemeColor() và cfg.themeColor dùng chung 1 ConfigItem, nên nếu gọi
+        # setThemeColor(color) trước rồi mới cfg.set(cfg.themeColor, color) thì item.value
+        # đã bằng color từ bước trước -> QConfig.set() thấy "không đổi" và return sớm,
+        # không bao giờ gọi self.save(). Truyền save=True thẳng vào đây để lưu đúng lúc.
+        setThemeColor(color, save=True)
+        
+        # 2. Update giao diện tự vẽ
+        self.play_btn.update()
+        self.equalizer.update()
+        self.seek_slider.update()
+        
+        if getattr(self, "shuffle_mode", False):
+            active_icon = get_tinted_icon(resource_path("assets/icons/shuffle_active.svg"))
+            self.shuffle_btn.setIcon(active_icon)
+            
+        if self.playlist_win is not None:
+            self.playlist_win.update_playlist_ui()
+            
+        self._refresh_ab_buttons()
 
     def open_settings(self):
         if self.settings_win is None:
@@ -1282,6 +1344,7 @@ class MainWindow(MSFluentWindow):
         pygame.mixer.music.stop()
         pygame.mixer.quit()
         qconfig.save()
+        cfg.save()
         QApplication.quit()
 
     def handle_ipc_message(self, file_path):
@@ -1309,7 +1372,7 @@ class MainWindow(MSFluentWindow):
             self.shuffle_history_pos = len(self.shuffle_history) - 1
             self.shuffle_btn.setToolTip("Shuffle: On (Play all tracks once)")
             # Đổi sang icon active (không cần phân biệt theme)
-            active_icon = QIcon(resource_path("assets/icons/shuffle_active.png"))
+            active_icon = get_tinted_icon(resource_path("assets/icons/shuffle_active.svg"))
             self.shuffle_btn.setIcon(active_icon)
         else:
             self.unplayed_indices = []
@@ -1340,6 +1403,7 @@ def main():
     probe.close()
 
     setTheme(cfg.themeMode.value)
+    setThemeColor(cfg.themeColor.value)
 
     win = MainWindow(startup_file=startup_file)
 
