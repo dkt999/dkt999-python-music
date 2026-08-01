@@ -228,9 +228,9 @@ def get_display_title(path):
 # Configuration
 # ============================================================================
 class Config(QConfig):
-    openMode = OptionsConfigItem("General", "OpenMode", "ask",
+    openMode = OptionsConfigItem("General", "OpenMode", "single",
                                   OptionsValidator(["ask", "folder", "single"]))
-    backgroundOnClose = ConfigItem("General", "BackgroundOnClose", True, BoolValidator())
+    backgroundOnClose = ConfigItem("General", "BackgroundOnClose", False, BoolValidator())
     repeatMode = OptionsConfigItem("General", "RepeatMode", "off",
                                     OptionsValidator(["off", "all", "one"]))
     volume = ConfigItem("General", "Volume", 70)
