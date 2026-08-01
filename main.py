@@ -71,6 +71,27 @@ try:
 except ImportError:
     HAS_MUTAGEN = False
 
+class MacApplication(QApplication):
+    """
+    Custom QApplication dành riêng cho macOS để hứng sự kiện 'FileOpen' (QFileOpenEvent)
+    khi người dùng Double Click file nhạc từ Finder hoặc dùng 'Open With'.
+    """
+    def __init__(self, argv):
+        super().__init__(argv)
+        self.main_window = None
+
+    def event(self, event):
+        # EventType.FileOpen (Code 116 trong Qt) chính là QFileOpenEvent của macOS
+        if event.type() == event.Type.FileOpen:
+            file_path = event.file()
+            if file_path and os.path.exists(file_path):
+                print(f"[macOS Event] Mở file từ Finder: {file_path}")
+                if self.main_window:
+                    # Gọi hàm gom file có sẵn trong MainWindow của fen
+                    self.main_window._queue_startup_files([file_path])
+            return True
+        return super().event(event)
+
 class PrimaryPlayButton(PushButton):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -568,7 +589,18 @@ class MainWindow(MSFluentWindow):
         saved_vol = cfg.volume.value
         self.last_volume = saved_vol if saved_vol > 0 else 70
         self.volume = saved_vol / 100.0
-        self.titleBar.maxBtn.hide()
+        if sys.platform == "darwin":
+            self.setMicaEffectEnabled(False)
+            if hasattr(self.titleBar, 'setDoubleEnabled'):
+                self.titleBar.setDoubleEnabled(False)
+
+            # macOS đã có sẵn traffic-light (đỏ/vàng/xanh) native ở góc trái,
+            # nên ẩn HẾT 3 nút Fluent tự vẽ, không show cái nào cả
+            self.titleBar.minBtn.hide()
+            self.titleBar.maxBtn.hide()
+            self.titleBar.closeBtn.hide()
+        else:
+            self.titleBar.maxBtn.hide()
         # Hide sidebar and back button from Title Bar
         self.navigationInterface.hide()
 
@@ -1510,20 +1542,15 @@ def _try_connect_running_instance(timeout_ms=200):
 def main():
     startup_files, skip_ask = _expand_startup_args(sys.argv[1:])
 
-    app = QApplication(sys.argv)
+    # --- BỔ SUNG: Dùng MacApplication nếu chạy trên macOS ---
+    if sys.platform == "darwin":
+        app = MacApplication(sys.argv)
+    else:
+        app = QApplication(sys.argv)
+        
     app.setQuitOnLastWindowClosed(False)
 
-    # --- Bầu ai là "primary" ---
-    # Trên Windows, khi người dùng chọn nhiều file rồi "Open with", Explorer
-    # có thể tạo NHIỀU process gần như cùng lúc (mỗi process 1 file, do
-    # MultiSelectModel mặc định của Windows là "Single" chứ không gộp thành
-    # 1 lần launch như Nautilus trên Ubuntu). Nếu process đầu tiên khởi động
-    # chậm (PyInstaller giải nén + import PyQt6/pygame/qfluentwidgets có thể
-    # mất hơn 200ms, đặc biệt lần chạy đầu hoặc máy có antivirus quét exe),
-    # 1 lần thử connect 200ms là không đủ và các process sau sẽ tưởng lầm là
-    # chưa có ai chạy rồi tự trở thành primary riêng -> mỗi process mở 1 cửa
-    # sổ với đúng 1 file, kể cả khi mở nhiều file cùng lúc. Ở đây ta poll lặp
-    # lại trong tối đa ~3 giây thay vì chỉ thử 1 lần.
+    # --- Bầu ai là "primary" (Code giữ nguyên của fen) ---
     sock = _try_connect_running_instance(200)
     if sock is None:
         for _ in range(14):  # 14 x 200ms ~= 2.8s tổng cộng
@@ -1538,8 +1565,6 @@ def main():
     QLocalServer.removeServer(IPC_SERVER_NAME)
     ipc_server = QLocalServer()
     if not ipc_server.listen(IPC_SERVER_NAME):
-        # Có process khác vừa thắng trong lúc ta đang poll ở trên -> gửi file
-        # cho họ thay vì tự mở cửa sổ mới. Cũng poll lặp lại cho chắc.
         retry_sock = None
         for _ in range(10):  # ~2s
             retry_sock = _try_connect_running_instance(200)
@@ -1554,6 +1579,10 @@ def main():
     setThemeColor(cfg.themeColor.value)
 
     win = MainWindow(startup_file=startup_files, skip_ask=skip_ask)
+
+    # --- BỔ SUNG: Liên kết MacApplication với MainWindow ---
+    if sys.platform == "darwin":
+        app.main_window = win
 
     # --- XỬ LÝ IPC MULTI-CONNECTION HOÀN CHỈNH ---
     def _on_new_ipc_connection():
